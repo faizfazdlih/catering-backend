@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../config/database');
 const axios = require('axios');
+const jwt = require('jsonwebtoken');
 
 // Tarif per kilometer (Rupiah)
 const TARIF_PER_KM = 2000;
@@ -205,7 +206,6 @@ router.get('/', async (req, res) => {
   }
 });
 
-// Update Pesanan Status (Admin)
 router.patch('/:id/status', async (req, res) => {
   try {
     const { id } = req.params;
@@ -216,8 +216,39 @@ router.patch('/:id/status', async (req, res) => {
       return res.status(400).json({ message: 'Status tidak valid' });
     }
 
-    await db.query('UPDATE pesanan SET status = ? WHERE id = ?', [status, id]);
+   
+    const [currentPesanan] = await db.query('SELECT status, user_id FROM pesanan WHERE id = ?', [id]);
     
+    if (currentPesanan.length === 0) {
+      return res.status(404).json({ message: 'Pesanan tidak ditemukan' });
+    }
+    const currentStatus = currentPesanan[0].status;
+    const ownerId = currentPesanan[0].user_id;
+
+    // Jika client mencoba mengubah status menjadi 'selesai', pastikan token valid dan pemilik pesanan
+    if (status === 'selesai') {
+      const authHeader = req.headers.authorization || req.headers.Authorization;
+      if (!authHeader) {
+        return res.status(401).json({ message: 'Autentikasi dibutuhkan untuk mengubah status menjadi selesai' });
+      }
+
+      const parts = authHeader.split(' ');
+      const token = parts.length === 2 && parts[0].toLowerCase() === 'bearer' ? parts[1] : authHeader;
+      let decoded;
+      try {
+        decoded = jwt.verify(token, process.env.JWT_SECRET);
+      } catch (err) {
+        return res.status(401).json({ message: 'Token tidak valid' });
+      }
+
+      // Hanya client pemilik pesanan yang boleh mengubah menjadi selesai
+      if (decoded.role !== 'client' || decoded.userId !== ownerId) {
+        return res.status(403).json({ message: 'Hanya client pemilik pesanan yang dapat mengkonfirmasi penerimaan (mengubah status menjadi selesai).' });
+      }
+    }
+
+    await db.query('UPDATE pesanan SET status = ? WHERE id = ?', [status, id]);
+
     res.json({ message: `Status pesanan berhasil diubah menjadi ${status}` });
   } catch (error) {
     console.error(error);
