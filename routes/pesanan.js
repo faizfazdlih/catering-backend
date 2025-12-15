@@ -1,6 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../config/database');
+const axios = require('axios');
+
+// Tarif per kilometer (Rupiah)
+const TARIF_PER_KM = 2000;
 
 // Create Pesanan
 router.post('/', async (req, res) => {
@@ -15,21 +19,89 @@ router.post('/', async (req, res) => {
       waktu_pengiriman,
       alamat_pengiriman, 
       jarak_km,
-      ongkir,
+      origin,
+      destination,
       items, // Array of {menu_id, jumlah, harga_satuan}
       catatan 
     } = req.body;
 
-    // Calculate total
-    let total_harga = parseFloat(ongkir) || 0;
-    items.forEach(item => {
-      total_harga += item.jumlah * item.harga_satuan;
+    // Hitung subtotal paket (harga menu)
+    let subtotalPaket = 0;
+    (items || []).forEach(item => {
+      subtotalPaket += item.jumlah * item.harga_satuan;
     });
+
+    // Hitung ongkir di server (abaikan jika client mengirim ongkir manual)
+    let computedOngkir = 0;
+
+    // Jika tersedia destination (dan possible origin), coba gunakan OpenRouteService (heigit)
+    if (destination) {
+      const serverOriginLat = process.env.ORIGIN_LAT ? parseFloat(process.env.ORIGIN_LAT) : null;
+      const serverOriginLng = process.env.ORIGIN_LNG ? parseFloat(process.env.ORIGIN_LNG) : null;
+
+      let usedOrigin = origin;
+      if (!usedOrigin) {
+        if (serverOriginLat !== null && serverOriginLng !== null) {
+          usedOrigin = { lat: serverOriginLat, lng: serverOriginLng };
+        }
+      }
+
+      if (!usedOrigin) {
+        return res.status(400).json({ message: 'Origin tidak disertakan dan ORIGIN_LAT/ORIGIN_LNG belum dikonfigurasi di server.' });
+      }
+
+      const ORS_KEY = process.env.HEIGIT_API_KEY || process.env.OPENROUTESERVICE_API_KEY;
+      if (!ORS_KEY) {
+        return res.status(500).json({ message: 'HEIGIT_API_KEY/OPENROUTESERVICE_API_KEY belum dikonfigurasi. Tidak bisa menghitung jarak otomatis.' });
+      }
+
+      if (typeof usedOrigin.lat !== 'number' || typeof usedOrigin.lng !== 'number' || typeof destination.lat !== 'number' || typeof destination.lng !== 'number') {
+        return res.status(400).json({ message: 'Format origin/destination tidak valid. Gunakan { lat, lng }.' });
+      }
+
+      const coordinates = [
+        [usedOrigin.lng, usedOrigin.lat],
+        [destination.lng, destination.lat]
+      ];
+
+      const orsUrl = 'https://api.openrouteservice.org/v2/directions/driving-car/geojson';
+      const orsResp = await axios.post(
+        orsUrl,
+        { coordinates },
+        {
+          headers: {
+            Authorization: ORS_KEY,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+
+      const feature = orsResp.data?.features?.[0];
+      const segment = feature?.properties?.segments?.[0];
+      if (!segment) {
+        return res.status(500).json({ message: 'Gagal mendapatkan rute dari heigit/ORS.' });
+      }
+
+      const distance_m = segment.distance;
+      const distance_km = distance_m / 1000;
+      computedOngkir = Math.ceil(distance_km * TARIF_PER_KM);
+
+      // set jarak_km supaya disimpan di DB
+      req.body.jarak_km = parseFloat(distance_km.toFixed(3));
+    } else if (jarak_km && jarak_km > 0) {
+      // jika client mengirim jarak_km, gunakan itu untuk menghitung ongkir
+      computedOngkir = Math.ceil(parseFloat(jarak_km) * TARIF_PER_KM);
+    } else {
+      return res.status(400).json({ message: 'Tidak ada data jarak. Sertakan destination (koordinat) atau jarak_km.' });
+    }
+
+    // Total akhir = subtotal paket + ongkir
+    const total_harga = subtotalPaket + computedOngkir;
 
     // Insert pesanan
     const [pesananResult] = await connection.query(
       'INSERT INTO pesanan (user_id, tanggal_pesan, waktu_pengiriman, alamat_pengiriman, jarak_km, ongkir, total_harga, catatan) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [user_id, tanggal_pesan, waktu_pengiriman, alamat_pengiriman, jarak_km, ongkir, total_harga, catatan]
+      [user_id, tanggal_pesan, waktu_pengiriman, alamat_pengiriman, req.body.jarak_km || jarak_km || null, computedOngkir, total_harga, catatan]
     );
 
     const pesanan_id = pesananResult.insertId;
