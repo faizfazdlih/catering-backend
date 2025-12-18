@@ -193,4 +193,17 @@ router.post('/admin/create', async (req, res) => {
   }
 });
 
+// Root info for easier debugging (GET /api/auth)
+router.get('/', (req, res) => {
+  res.json({
+    message: 'Auth routes root',
+    endpoints: {
+      register: '/api/auth/register (POST)',
+      login: '/api/auth/login (POST)',
+      pending_users: '/api/auth/admin/pending-users (GET)',
+      users: '/api/auth/admin/users (GET)'
+    }
+  });
+});
+
 module.exports = router;
