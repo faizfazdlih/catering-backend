@@ -10,8 +10,7 @@ const path = require('path');
 router.get('/', async (req, res) => {
   try {
     const [menu] = await db.query(
-      'SELECT * FROM menu WHERE status = ? ORDER BY kategori, nama_menu',
-      ['tersedia']
+      'SELECT * FROM menu ORDER BY kategori, nama_menu'
     );
     res.json({ menu });
   } catch (error) {
