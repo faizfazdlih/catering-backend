@@ -276,4 +276,149 @@ router.get('/admin/statistics', async (req, res) => {
   }
 });
 
+// Get Chart Data (Admin) - Today, Weekly, Monthly
+router.get('/admin/chart-data', async (req, res) => {
+  try {
+    const { period } = req.query; // 'today', 'weekly', 'monthly'
+
+    let chartData = [];
+
+    if (period === 'today') {
+      // Data per jam hari ini
+      const [results] = await db.query(`
+        SELECT 
+          HOUR(created_at) as label,
+          COUNT(*) as orders,
+          COALESCE(SUM(total_harga), 0) as revenue
+        FROM pesanan
+        WHERE DATE(created_at) = CURDATE()
+        GROUP BY HOUR(created_at)
+        ORDER BY label
+      `);
+      
+      // Fill missing hours with 0
+      const hourlyData = Array(24).fill(null).map((_, i) => ({
+        label: i.toString(),
+        orders: 0,
+        revenue: 0
+      }));
+      
+      results.forEach(row => {
+        hourlyData[row.label] = {
+          label: row.label.toString(),
+          orders: row.orders,
+          revenue: parseFloat(row.revenue) || 0
+        };
+      });
+      
+      chartData = hourlyData;
+
+    } else if (period === 'weekly') {
+      // Data 7 hari terakhir - simplified approach
+      const [results] = await db.query(`
+        SELECT 
+          DATE(created_at) as order_date,
+          COUNT(*) as orders,
+          COALESCE(SUM(total_harga), 0) as revenue
+        FROM pesanan
+        WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+        GROUP BY DATE(created_at)
+        ORDER BY order_date
+      `);
+      
+      // Create date map for results
+      const dataMap = {};
+      results.forEach(row => {
+        // Convert date to simple string format YYYY-MM-DD
+        const dateObj = new Date(row.order_date);
+        const year = dateObj.getFullYear();
+        const month = String(dateObj.getMonth() + 1).padStart(2, '0');
+        const day = String(dateObj.getDate()).padStart(2, '0');
+        const dateStr = `${year}-${month}-${day}`;
+        
+        dataMap[dateStr] = {
+          orders: row.orders,
+          revenue: parseFloat(row.revenue) || 0
+        };
+      });
+      
+      // Fill in all 7 days
+      const weekData = [];
+      const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+      const today = new Date();
+      
+      for (let i = 6; i >= 0; i--) {
+        const date = new Date(today);
+        date.setDate(date.getDate() - i);
+        date.setHours(0, 0, 0, 0);
+        
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        const dateStr = `${year}-${month}-${day}`;
+        const dayName = dayNames[date.getDay()];
+        
+        weekData.push({
+          label: dayName,
+          orders: dataMap[dateStr] ? dataMap[dateStr].orders : 0,
+          revenue: dataMap[dateStr] ? dataMap[dateStr].revenue : 0
+        });
+      }
+      
+      chartData = weekData;
+
+    } else if (period === 'monthly') {
+      // Data 4 minggu terakhir (group by week)
+      const [results] = await db.query(`
+        SELECT 
+          FLOOR(DATEDIFF(CURDATE(), DATE(created_at)) / 7) as week_offset,
+          COUNT(*) as orders,
+          COALESCE(SUM(total_harga), 0) as revenue
+        FROM pesanan
+        WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 28 DAY)
+        GROUP BY week_offset
+        ORDER BY week_offset DESC
+      `);
+      
+      // Create week map
+      const weekMap = {};
+      results.forEach(row => {
+        weekMap[row.week_offset] = {
+          orders: row.orders,
+          revenue: parseFloat(row.revenue) || 0
+        };
+      });
+      
+      // Generate 4 weeks data
+      const monthData = [];
+      for (let i = 3; i >= 0; i--) {
+        const weekNum = 4 - i;
+        if (weekMap[i]) {
+          monthData.push({
+            label: `Week ${weekNum}`,
+            orders: weekMap[i].orders,
+            revenue: weekMap[i].revenue
+          });
+        } else {
+          monthData.push({
+            label: `Week ${weekNum}`,
+            orders: 0,
+            revenue: 0
+          });
+        }
+      }
+      
+      chartData = monthData;
+    } else {
+      return res.status(400).json({ message: 'Invalid period. Use: today, weekly, or monthly' });
+    }
+
+    res.json({ chartData });
+  } catch (error) {
+    console.error('Chart Data Error:', error);
+    console.error('Error stack:', error.stack);
+    res.status(500).json({ message: 'Terjadi kesalahan server', error: error.message });
+  }
+});
+
 module.exports = router;
